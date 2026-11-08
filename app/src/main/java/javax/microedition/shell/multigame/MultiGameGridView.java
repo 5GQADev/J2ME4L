@@ -315,6 +315,10 @@ public final class MultiGameGridView extends FrameLayout {
             MultiGameSessionLauncher.setHostPaused(this, true);
             MIDlet midlet = owner;
             if (midlet != null) MidletThread.pauseApp(midlet);
+            Displayable displayable = current;
+            if (displayable instanceof javax.microedition.lcdui.Canvas) {
+                ((javax.microedition.lcdui.Canvas) displayable).pauseRendering();
+            }
         }
 
         /** Resume this slot after the multi-game Activity returns to foreground. */
@@ -323,6 +327,10 @@ public final class MultiGameGridView extends FrameLayout {
             MultiGameSessionLauncher.setHostPaused(this, false);
             MIDlet midlet = owner;
             if (midlet != null) MidletThread.resumeApp(midlet);
+            Displayable displayable = current;
+            if (displayable instanceof javax.microedition.lcdui.Canvas) {
+                ((javax.microedition.lcdui.Canvas) displayable).resumeRendering();
+            }
         }
 
         @Override
