@@ -182,6 +182,11 @@ public abstract class Canvas extends Displayable {
 	private Handler uiHandler;
 	private Overlay overlay;
 	private FpsCounter fpsCounter;
+	// Guards against duplicate overlay layers when surfaceCreated fires more
+	// than once (rapid visibility toggles on some Android versions). Without it
+	// repeated maximize/restore cycles leak soft-bar/fps layers, eventually
+	// corrupting the overlay draw and exhausting memory.
+	private boolean softBarAttached;
 	private boolean skipLeftSoft;
 	private boolean skipRightSoft;
 	private int[][] lastPointerPos = new int[20][2];
@@ -868,6 +873,25 @@ public abstract class Canvas extends Displayable {
 		return renderFpsLimit;
 	}
 
+	/**
+	 * Activity-level GL pause. Call only from the main thread, in the host
+	 * Activity's onPause(). Never from SurfaceHolder callbacks (see
+	 * GLRenderer.stop() for why). With setPreserveEGLContextOnPause(true) the
+	 * EGL context and all textures survive this pause, so resume is cheap and
+	 * cannot lose the framebuffer content.
+	 */
+	public void pauseRendering() {
+		if (sessionGraphicsMode == 1 && innerView instanceof GLSurfaceView) {
+			((GLSurfaceView) innerView).onPause();
+		}
+	}
+
+	public void resumeRendering() {
+		if (sessionGraphicsMode == 1 && innerView instanceof GLSurfaceView) {
+			((GLSurfaceView) innerView).onResume();
+		}
+	}
+
 	private class GLRenderer implements GLSurfaceView.Renderer {
 		private final FloatBuffer vbo = ByteBuffer.allocateDirect(8 * 2 * 4)
 				.order(ByteOrder.nativeOrder()).asFloatBuffer();
@@ -896,6 +920,11 @@ public abstract class Canvas extends Displayable {
 		@Override
 		public void onSurfaceChanged(GL10 gl, int width, int height) {
 			glViewport(0, 0, width, height);
+			// program can be null if onSurfaceChanged fires before onSurfaceCreated
+			// (observed during rapid visibility toggles); skip uniform setup.
+			if (program == null) {
+				return;
+			}
 			glUniform2f(program.uPixelDelta, 1.0f / width, 1.0f / height);
 		}
 
@@ -933,11 +962,18 @@ public abstract class Canvas extends Displayable {
 				vertex_bg.put(gr).put(gt).put(  tw).put(0.0f);// rt
 				vertex_bg.put(gr).put(gb).put(  tw).put(  th);// rb
 			}
-			if (isStarted) {
+			// Always queue the VBO update once the view exists. The old isStarted
+			// gate dropped updates during surface churn (e.g. maximize/restore),
+			// leaving stale texture coordinates on screen -> corrupted display.
+			// queueEvent() is safe before the GL thread has fully started; the
+			// event runs when the thread begins.
+			if (mView != null) {
 				mView.queueEvent(() -> {
 					Bitmap bitmap = offscreenCopy.getBitmap();
 					synchronized (vbo) {
-						program.loadVbo(vbo, bitmap.getWidth(), bitmap.getHeight());
+						if (program != null) {
+							program.loadVbo(vbo, bitmap.getWidth(), bitmap.getHeight());
+						}
 					}
 				});
 			}
@@ -1004,13 +1040,24 @@ public abstract class Canvas extends Displayable {
 			this.mView = mView;
 		}
 
+		/**
+		 * Called from the SurfaceHolder callback when the surface is temporarily
+		 * lost (e.g. a slot is hidden during maximize). Must NOT tear down the
+		 * GL thread or EGL context: GLSurfaceView preserves the context across
+		 * surface loss, and calling onPause() here would destroy the context on
+		 * every maximize/restore toggle. After long-running sessions and repeated
+		 * toggles that context churn causes texture loss, stale VBO state and
+		 * native crashes. Activity-level pause is handled separately by
+		 * Canvas.pauseRendering()/resumeRendering(), never from surface callbacks.
+		 */
 		public void stop() {
 			isStarted = false;
-			mView.onPause();
 		}
 
 		public void start() {
-			mView.onResume();
+			if (mView != null) {
+				mView.requestRender();
+			}
 		}
 
 		private Single<Bitmap> takeScreenShot() {
@@ -1359,11 +1406,14 @@ public abstract class Canvas extends Displayable {
 			surface = holder.getSurface();
 			Display.postEvent(CanvasEvent.getInstance(Canvas.this, CanvasEvent.SHOW_NOTIFY));
 			repaintInternal();
-			if (sessionShowFps) {
+			if (sessionShowFps && fpsCounter == null) {
 				fpsCounter = new FpsCounter(overlayView);
 				overlayView.addLayer(fpsCounter);
 			}
-			overlayView.addLayer(softBar, 0);
+			if (!softBarAttached) {
+				overlayView.addLayer(softBar, 0);
+				softBarAttached = true;
+			}
 			overlayView.setVisibility(true);
 			overlay = ContextHolder.getVk();
 			if (overlay != null) {
@@ -1385,7 +1435,10 @@ public abstract class Canvas extends Displayable {
 				overlayView.removeLayer(fpsCounter);
 				fpsCounter = null;
 			}
-			overlayView.removeLayer(softBar);
+			if (softBarAttached) {
+				overlayView.removeLayer(softBar);
+				softBarAttached = false;
+			}
 			softBar.closeMenu();
 			overlayView.setVisibility(false);
 			if (overlay != null) {
