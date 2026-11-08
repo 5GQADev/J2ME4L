@@ -34,6 +34,12 @@ public class GlesView extends GLSurfaceView {
 		setEGLContextClientVersion(2);
 		setEGLConfigChooser(false);
 		setWillNotDraw(true);
+		// Keep the EGL context + textures alive across onPause() (activity background)
+		// and temporary surface loss (slot hidden during maximize). Without this,
+		// every pause/resume or visibility toggle destroys the GL context; after
+		// repeated toggles the accumulated context churn leads to corrupted frames
+		// and native driver crashes.
+		setPreserveEGLContextOnPause(true);
 	}
 
 	@Override
